@@ -6,6 +6,7 @@
 #include <string>
 #include <cstring>
 #include <map>
+#include <set>
 #include <fstream>
 #include <time.h>
 #include "BOBHASH32.h"
@@ -14,9 +15,11 @@ using namespace std;
 
 //-------------------------------------------------------------------------------------
 // global default settings
-string dataset = "ddos_2.dat";
-// string dataset = "stack";
-int num_periods = 1000, co_p = 1, co_f = 1, top_k = 100, window_size, experiment_idx = 0;
+// string dataset = "ddos_2.dat";
+string dataset = "stack";
+int num_periods = 1000, co_p = 3, co_f = 10, top_k = 100, window_size, experiment_idx = 0;
+int th_p = 30, th_f = 100;
+bool THRESHOLD = true; bool has_auxiliary_array = false;
 const int MAX_ENTRIES = 13000005;
 const int MAX_ITEMS = 1000005;
 const int MAX_BUCKETS = 10005; // 10K buckets will consume 640K memory
@@ -38,6 +41,7 @@ class LongTailClock {
     public:
     struct CELL {int persistency; bool odd, even; string ID; int count;};
     CELL ** LTC;
+    set<string> sig_items; // used for finding significant items with threshold
     int M;
     bool freq_replacement;
     bool two_level;
@@ -49,6 +53,11 @@ class LongTailClock {
         cells_per_bucket = _cells_per_bucket;
         two_level = !(first_layer == 1);
         bobhash = new BOBHash32(hash_seed);
+        if (THRESHOLD) {
+            // if using auxiliary array, there is additional memory overhead
+            if (has_auxiliary_array)
+                MEM = MEM * 0.8;
+        }
         M = MEM * 1024 / cells_per_bucket / 8;  //the number of buckets
         if (two_level) {
             M1 = M * first_layer;
@@ -81,6 +90,10 @@ class LongTailClock {
 
     void insert(string x, int T)
     {
+        if (THRESHOLD && has_auxiliary_array) {
+            if (sig_items.find(x) != sig_items.end())
+                return;
+        }
         int P_idx = (Last_T / window_size) % 2; // judge whether this period is an even-numbered period or an odd-numbered period
         if (T/window_size == Last_T / window_size) { // if the item x does not cause the increment of period
             // the pointer p moves clockwise
@@ -153,6 +166,15 @@ class LongTailClock {
                         LTC[k][p].even = 1; 
                     LTC[k][p].count++; 
                     has_item = true;
+                    if (THRESHOLD) {
+                        if (LTC[k][p].count >= th_f && LTC[k][p].persistency >= th_p-1) {
+                            if (has_auxiliary_array) {
+                                LTC[k][p].count = 0;
+                                LTC[k][p].persistency = 0;
+                            }
+                            sig_items.insert(LTC[k][p].ID);
+                        }
+                    }
                     break;
                 } // if x is found in that bucket
                 else // calculate the smallest cell
@@ -252,6 +274,7 @@ int timestamp[MAX_ENTRIES];
 // data structures used by calculate_real_significance() and passed to run_ltc()
 map <string, int> items_of_period, real_persistency, item_count, top_significance, all_significance;
 map <string, bool> if_ddos;
+set<string> real_sig_items;
 struct NODE{string x; int y;} real_significance[MAX_ITEMS], LTC_significance[MAX_ITEMS];
 int bin_stat[32]; float bin_total;
 int ddos_total = 0;
@@ -340,17 +363,24 @@ void calculate_real_significance() {
         if (dataset.substr(0, 4) == "ddos" && if_ddos[sit->first]) {
             ddos_total ++;
         }
+        if (THRESHOLD) {
+            if (sit->second >= th_f && real_persistency[sit->first] >= th_p) {
+                real_sig_items.insert(sit->first);
+            }
+        }
         real_significance[++CNT].x = sit->first; // means the ID
         real_significance[CNT].y = real_persistency[sit->first]*co_p + sit->second*co_f; // means the significance
     }
+    cout << real_sig_items.size() << endl;
 
     sort(real_significance+1, real_significance+CNT+1, cmp); // sort all values
 
     for (int i=1; i<=top_k; i++) {
         top_significance[real_significance[i].x] = real_significance[i].y;
     }
-    for (int i=1; i<=CNT; i++) 
+    for (int i=1; i<=CNT; i++) {
         all_significance[real_significance[i].x] = real_significance[i].y;
+    }
     cout << "calculating ground truth is done" << endl;
 }
 
@@ -397,8 +427,25 @@ void run_ltc(string mode, int MEM, bool freq_replacement, int cells_per_bucket,
         //     LTC_significance[i].x.c_str(), LTC_significance[i].y, all_significance[LTC_significance[i].x]);
     }
 
-    if (ddos_total != 0)    
+    if (ddos_total != 0)
         ddos_recall = ddos_cnt / float(ddos_total);
+    if (THRESHOLD) {
+        float recall = 0;
+        for (set<string>::iterator sit = real_sig_items.begin(); sit != real_sig_items.end(); sit ++) {
+            if (ltc.sig_items.find(*sit) != ltc.sig_items.end()) {
+                recall ++;
+            }
+        }
+        recall = recall/real_sig_items.size();
+        float precision = 0;
+        for (set<string>::iterator sit = ltc.sig_items.begin(); sit != ltc.sig_items.end(); sit ++) {
+            if (real_sig_items.find(*sit) != real_sig_items.end()) {
+                precision ++;
+            }
+        }
+        precision = precision/ltc.sig_items.size();
+        fprintf(f_pre, "%s,%d,%.5f\n", mode.c_str(), MEM, 2*precision*recall/(precision+recall));
+    }
     if (f_are != NULL && f_pre != NULL) {
         ARE/=top_k; PRE/=top_k;
         printf("mode:%s, precision: %.5f, ARE: %.5f\n", mode.c_str(), PRE, ARE);
@@ -473,6 +520,25 @@ void test_v2_v3_mem(string f1, string f2) {
     fclose(f_pre);
     fclose(f_are);
 }
+
+
+void test_threshold() {
+    FILE * f_pre = fopen("freq_replacement/threshold.txt", "w");
+    fprintf(f_pre, "Algo,Memory size (KB),$F_1$ score\n");
+    
+    int NUM_REPEAT = 1;
+    int cells_per_bucket = 8;
+    for (int MEM = 10; MEM <= 50; MEM += 10) {
+        for (int i = 0; i < NUM_REPEAT; i ++) {   
+            has_auxiliary_array = true;
+            run_ltc("LTC\\_Y", MEM, true, cells_per_bucket, 1, f_pre, NULL);
+            has_auxiliary_array = false;
+            run_ltc("LTC\\_N", MEM, true, cells_per_bucket, 1, f_pre, NULL);
+        }
+    }
+    fclose(f_pre);
+}
+
 
 void test_v1_v3_time() {
     FILE * f_time = fopen("two_layers/time.txt", "w");
@@ -566,10 +632,11 @@ int main() {
     read_file();
     calculate_real_significance();
     if (dataset == "stack") {
-        test_v1_v2_mem("freq_replacement/ltc_pre.txt", "freq_replacement/ltc_are.txt");
-        test_v2_v3_mem("two_layers/ltc_pre.txt", "two_layers/ltc_are.txt");
-        test_v1_v3_time();
-        test_v1_cells_per_bucket();
+        test_threshold();
+        // test_v1_v2_mem("freq_replacement/ltc_pre.txt", "freq_replacement/ltc_are.txt");
+        // test_v2_v3_mem("two_layers/ltc_pre.txt", "two_layers/ltc_are.txt");
+        // test_v1_v3_time();
+        // test_v1_cells_per_bucket();
         // co_p = 1; co_f = 0;
         // calculate_real_significance();
         // test_v1_v2_mem("freq_replacement/ltc_pre_p.txt", "freq_replacement/ltc_are_p.txt");
