@@ -2,9 +2,9 @@
 
 ## Introduction
 
-LTC is a succinct data structure to find top significant or frequent or persistent items in a high speed data stream. It is first published in ICDE 2019, and the Journal version of this paper is under review. This repository is the code for the Journal version paper.
+LTC is a succinct data structure to find top significant or frequent or persistent items in a high speed data stream. It is first published in ICDE 2019, and the Journal version of this paper is under review. This repository is the code for the Journal version paper:
 
-    Yang, Tong, et al. "Finding Significant Items in Data Streams." 2019 IEEE 35th International Conference on Data Engineering (ICDE). IEEE, 2019.
+[LTC: A Fast Algorithm to Accurately Find Significant Items in Data Streams](https://ieeexplore.ieee.org/document/9263374)
 
 ## Source Code.
 
